@@ -28,6 +28,7 @@ pub struct UndoInfo {
     pub castling_rights: CastlingRights,
     pub en_passant: Option<(usize, usize)>,
     pub halfmove_clock: u32,
+    pub king_positions: [Option<(usize, usize)>; 2],
 }
 
 /// The chess board state
@@ -41,6 +42,8 @@ pub struct Board {
     pub halfmove_clock: u32,
     pub fullmove_number: u32,
     pub undo_stack: Vec<(Move, UndoInfo)>,
+    /// Cached king positions: [White index, Black index]
+    pub king_positions: [Option<(usize, usize)>; 2],
 }
 
 impl Default for Board {
@@ -60,6 +63,7 @@ impl Board {
             halfmove_clock: 0,
             fullmove_number: 1,
             undo_stack: Vec::new(),
+            king_positions: [Some((0, 4)), Some((7, 4))],
         };
 
         // Place white pieces
@@ -101,18 +105,23 @@ impl Board {
         self.squares[rank][file] = piece;
     }
 
-    /// Find the king's position for a given color
-    pub fn find_king(&self, color: Color) -> Option<(usize, usize)> {
-        for rank in 0..8 {
-            for file in 0..8 {
-                if let Some(piece) = self.squares[rank][file] {
-                    if piece.color == color && piece.piece_type == PieceType::King {
-                        return Some((rank, file));
-                    }
-                }
-            }
+    /// Get the color index for king_positions array (0=White, 1=Black)
+    #[inline]
+    fn color_index(color: Color) -> usize {
+        match color {
+            Color::White => 0,
+            Color::Black => 1,
         }
-        None
+    }
+
+    /// Find the king's position for a given color (O(1) with cache)
+    pub fn find_king(&self, color: Color) -> Option<(usize, usize)> {
+        self.king_positions[Self::color_index(color)]
+    }
+
+    /// Update the cached king position
+    fn update_king_position(&mut self, color: Color, rank: usize, file: usize) {
+        self.king_positions[Self::color_index(color)] = Some((rank, file));
     }
 
     /// Check if a square is attacked by a given color
@@ -216,7 +225,7 @@ impl Board {
         false
     }
 
-    /// Check if the given color's king is in check
+    /// Check if the given color's king is in check (uses cached king position)
     pub fn is_in_check(&self, color: Color) -> bool {
         if let Some((rank, file)) = self.find_king(color) {
             self.is_square_attacked(rank, file, color.opposite())
@@ -232,6 +241,7 @@ impl Board {
             castling_rights: self.castling_rights,
             en_passant: self.en_passant,
             halfmove_clock: self.halfmove_clock,
+            king_positions: self.king_positions,
         };
 
         let piece = self.squares[mv.from_rank][mv.from_file].unwrap();
@@ -270,6 +280,11 @@ impl Board {
             self.squares[mv.to_rank][mv.to_file] = Some(Piece::new(piece.color, promo));
         } else {
             self.squares[mv.to_rank][mv.to_file] = Some(piece);
+        }
+
+        // Update cached king position
+        if piece.piece_type == PieceType::King {
+            self.update_king_position(piece.color, mv.to_rank, mv.to_file);
         }
 
         // Update en passant square
@@ -378,10 +393,11 @@ impl Board {
                 self.squares[mv.from_rank][rook_from_file] = rook;
             }
 
-            // Restore state
+            // Restore state (including cached king positions)
             self.castling_rights = undo_info.castling_rights;
             self.en_passant = undo_info.en_passant;
             self.halfmove_clock = undo_info.halfmove_clock;
+            self.king_positions = undo_info.king_positions;
 
             if self.current_turn == Color::Black {
                 self.fullmove_number -= 1;

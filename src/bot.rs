@@ -30,11 +30,20 @@ impl BotDifficulty {
     }
 }
 
-/// Chess bot using minimax with alpha-beta pruning
+/// Search result for a position
+enum SearchResult {
+    /// Normal score
+    Score(i32),
+    /// Time ran out, result is unreliable
+    Timeout,
+}
+
+/// Chess bot using negamax with alpha-beta pruning
 pub struct ChessBot {
     difficulty: BotDifficulty,
     nodes_searched: u64,
     time_limit: Duration,
+    timed_out: bool,
 }
 
 impl ChessBot {
@@ -43,6 +52,7 @@ impl ChessBot {
             difficulty,
             nodes_searched: 0,
             time_limit: Duration::from_secs(10),
+            timed_out: false,
         }
     }
 
@@ -53,6 +63,7 @@ impl ChessBot {
     /// Find the best move for the current position
     pub fn find_best_move(&mut self, board: &Board) -> Option<Move> {
         self.nodes_searched = 0;
+        self.timed_out = false;
         let start_time = Instant::now();
 
         let moves = MoveGenerator::generate_legal_moves(board);
@@ -60,7 +71,6 @@ impl ChessBot {
             return None;
         }
 
-        let color = board.current_turn;
         let depth = self.difficulty.depth();
 
         let mut best_move = moves[0];
@@ -70,73 +80,82 @@ impl ChessBot {
         let mut ordered_moves = moves;
         Self::order_moves(board, &mut ordered_moves);
 
-        for mv in ordered_moves {
-            let mut new_board = board.clone();
-            new_board.make_move(mv);
+        let mut board = board.clone();
 
-            let score = -self.negamax(
-                &mut new_board,
+        for mv in ordered_moves {
+            board.make_move(mv);
+            let result = self.negamax(
+                &mut board,
                 depth - 1,
                 i32::MIN + 1,
                 i32::MAX,
-                color.opposite(),
                 start_time,
             );
+            board.undo_move();
+
+            if self.timed_out {
+                break;
+            }
+
+            let score = match result {
+                SearchResult::Score(s) => -s,
+                SearchResult::Timeout => continue,
+            };
 
             if score > best_score {
                 best_score = score;
                 best_move = mv;
-            }
-
-            // Time check
-            if start_time.elapsed() > self.time_limit {
-                break;
             }
         }
 
         Some(best_move)
     }
 
-    /// Negamax with alpha-beta pruning
+    /// Negamax with alpha-beta pruning (uses make/undo instead of cloning)
     fn negamax(
         &mut self,
         board: &mut Board,
         depth: u32,
         mut alpha: i32,
         beta: i32,
-        color: Color,
         start_time: Instant,
-    ) -> i32 {
+    ) -> SearchResult {
         self.nodes_searched += 1;
 
-        // Time check
-        if start_time.elapsed() > self.time_limit {
-            return 0;
+        // Time check every 1024 nodes to reduce overhead
+        if self.nodes_searched & 1023 == 0 && start_time.elapsed() > self.time_limit {
+            self.timed_out = true;
+            return SearchResult::Timeout;
         }
 
-        // Check for terminal positions
-        if MoveGenerator::is_checkmate(board) {
-            return -Evaluator::CHECKMATE_SCORE - depth as i32; // Prefer faster checkmates
+        if self.timed_out {
+            return SearchResult::Timeout;
         }
 
-        if MoveGenerator::is_stalemate(board)
-            || MoveGenerator::is_insufficient_material(board)
+        // Generate legal moves once (not 3 times like before)
+        let moves = MoveGenerator::generate_legal_moves(board);
+
+        if moves.is_empty() {
+            if board.is_in_check(board.current_turn) {
+                return SearchResult::Score(-(Evaluator::CHECKMATE_SCORE + depth as i32));
+            }
+            return SearchResult::Score(0); // Stalemate
+        }
+
+        // Draw checks
+        if MoveGenerator::is_insufficient_material(board)
             || MoveGenerator::is_fifty_move_draw(board)
         {
-            return 0; // Draw
+            return SearchResult::Score(0);
         }
 
-        // Leaf node
+        // Leaf node — use quiescence search
         if depth == 0 {
-            return self.quiescence_search(board, alpha, beta, color, 4, start_time);
-        }
-
-        let moves = MoveGenerator::generate_legal_moves(board);
-        if moves.is_empty() {
-            if board.is_in_check(color) {
-                return -Evaluator::CHECKMATE_SCORE - depth as i32;
-            }
-            return 0; // Stalemate
+            let score = self.quiescence_search(board, alpha, beta, 4, start_time);
+            return match score {
+                SearchResult::Score(s) => SearchResult::Score(s),
+                SearchResult::Timeout => SearchResult::Timeout,
+            };
         }
 
         // Order moves for better pruning
@@ -145,40 +164,54 @@ impl ChessBot {
 
         for mv in ordered_moves {
             board.make_move(mv);
-            let score = -self.negamax(board, depth - 1, -beta, -alpha, color.opposite(), start_time);
+            let result = self.negamax(board, depth - 1, -beta, -alpha, start_time);
             board.undo_move();
 
+            if let SearchResult::Timeout = result {
+                return SearchResult::Timeout;
+            }
+
+            let score = -match result {
+                SearchResult::Score(s) => s,
+                _ => unreachable!(),
+            };
+
             if score >= beta {
-                return beta; // Beta cutoff
+                return SearchResult::Score(beta); // Beta cutoff
             }
             if score > alpha {
                 alpha = score;
             }
         }
 
-        alpha
+        SearchResult::Score(alpha)
     }
 
-    /// Quiescence search to handle tactical positions
+    /// Quiescence search to handle tactical positions (captures only)
     fn quiescence_search(
         &mut self,
         board: &mut Board,
         mut alpha: i32,
         beta: i32,
-        color: Color,
         depth: i32,
         start_time: Instant,
-    ) -> i32 {
+    ) -> SearchResult {
         self.nodes_searched += 1;
 
-        if start_time.elapsed() > self.time_limit || depth <= 0 {
-            return Evaluator::evaluate(board, color);
+        if self.timed_out || depth <= 0 {
+            return SearchResult::Score(Evaluator::evaluate_absolute_for(board, board.current_turn));
         }
 
-        let stand_pat = Evaluator::evaluate(board, color);
+        // Time check
+        if self.nodes_searched & 1023 == 0 && start_time.elapsed() > self.time_limit {
+            self.timed_out = true;
+            return SearchResult::Timeout;
+        }
+
+        let stand_pat = Evaluator::evaluate_absolute_for(board, board.current_turn);
 
         if stand_pat >= beta {
-            return beta;
+            return SearchResult::Score(beta);
         }
         if stand_pat > alpha {
             alpha = stand_pat;
@@ -186,27 +219,39 @@ impl ChessBot {
 
         // Only search captures
         let moves = MoveGenerator::generate_legal_moves(board);
-        let captures: Vec<Move> = moves
+        let mut captures: Vec<Move> = moves
             .into_iter()
             .filter(|mv| {
                 board.get(mv.to_rank, mv.to_file).is_some() || mv.is_en_passant
             })
             .collect();
 
+        // Order captures by MVV-LVA
+        Self::order_moves(board, &mut captures);
+
         for mv in captures {
             board.make_move(mv);
-            let score = -self.quiescence_search(board, -beta, -alpha, color.opposite(), depth - 1, start_time);
+            let result = self.quiescence_search(board, -beta, -alpha, depth - 1, start_time);
             board.undo_move();
 
+            if let SearchResult::Timeout = result {
+                return SearchResult::Timeout;
+            }
+
+            let score = -match result {
+                SearchResult::Score(s) => s,
+                _ => unreachable!(),
+            };
+
             if score >= beta {
-                return beta;
+                return SearchResult::Score(beta);
             }
             if score > alpha {
                 alpha = score;
             }
         }
 
-        alpha
+        SearchResult::Score(alpha)
     }
 
     /// Order moves to improve alpha-beta pruning
@@ -214,9 +259,8 @@ impl ChessBot {
         moves.sort_by_key(|mv| {
             let mut score = 0;
 
-            // Captures are good
+            // Captures are good (MVV-LVA: Most Valuable Victim - Least Valuable Attacker)
             if let Some(captured) = board.get(mv.to_rank, mv.to_file) {
-                // MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
                 let attacker = board.get(mv.from_rank, mv.from_file).unwrap();
                 score -= 10 * captured.piece_type.value() - attacker.piece_type.value();
             }

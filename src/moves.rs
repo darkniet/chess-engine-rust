@@ -349,37 +349,65 @@ impl MoveGenerator {
     pub fn is_insufficient_material(board: &Board) -> bool {
         let mut white_pieces: Vec<PieceType> = Vec::new();
         let mut black_pieces: Vec<PieceType> = Vec::new();
+        let mut white_bishops: Vec<(usize, usize)> = Vec::new();
+        let mut black_bishops: Vec<(usize, usize)> = Vec::new();
 
         for rank in 0..8 {
             for file in 0..8 {
                 if let Some(piece) = board.get(rank, file) {
                     match piece.color {
-                        Color::White => white_pieces.push(piece.piece_type),
-                        Color::Black => black_pieces.push(piece.piece_type),
+                        Color::White => {
+                            white_pieces.push(piece.piece_type);
+                            if piece.piece_type == PieceType::Bishop {
+                                white_bishops.push((rank, file));
+                            }
+                        }
+                        Color::Black => {
+                            black_pieces.push(piece.piece_type);
+                            if piece.piece_type == PieceType::Bishop {
+                                black_bishops.push((rank, file));
+                            }
+                        }
                     }
                 }
             }
         }
 
+        let white_minor = white_pieces.iter().filter(|&&p| p != PieceType::King && p != PieceType::Pawn).count();
+        let black_minor = black_pieces.iter().filter(|&&p| p != PieceType::King && p != PieceType::Pawn).count();
+
         // King vs King
-        if white_pieces.len() == 1 && black_pieces.len() == 1 {
+        if white_minor == 0 && black_minor == 0 {
             return true;
         }
 
         // King + minor piece vs King
-        if white_pieces.len() == 1
-            && black_pieces.len() == 2
-            && (black_pieces.contains(&PieceType::Bishop)
-                || black_pieces.contains(&PieceType::Knight))
+        if white_minor == 0 && black_minor == 1
+            && (black_pieces.contains(&PieceType::Bishop) || black_pieces.contains(&PieceType::Knight))
         {
             return true;
         }
-        if black_pieces.len() == 1
-            && white_pieces.len() == 2
-            && (white_pieces.contains(&PieceType::Bishop)
-                || white_pieces.contains(&PieceType::Knight))
+        if black_minor == 0 && white_minor == 1
+            && (white_pieces.contains(&PieceType::Bishop) || white_pieces.contains(&PieceType::Knight))
         {
             return true;
+        }
+
+        // King + Bishop vs King + Bishop (same color squares)
+        if white_pieces.len() == 2 && black_pieces.len() == 2 {
+            if let (Some(_), Some(_)) = (white_pieces.iter().find(|&&p| p == PieceType::Bishop),
+                                          black_pieces.iter().find(|&&p| p == PieceType::Bishop)) {
+                if white_bishops.len() == 1 && black_bishops.len() == 1 {
+                    let wb = white_bishops[0];
+                    let bb = black_bishops[0];
+                    // Check if both bishops are on the same color square
+                    let wb_color = (wb.0 + wb.1) % 2;
+                    let bb_color = (bb.0 + bb.1) % 2;
+                    if wb_color == bb_color {
+                        return true;
+                    }
+                }
+            }
         }
 
         false
