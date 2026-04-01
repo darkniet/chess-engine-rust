@@ -93,6 +93,16 @@ impl Evaluator {
         }
     }
 
+    /// Evaluate from absolute perspective, then flip for the given color
+    /// More efficient than evaluate() when you already know whose turn it is
+    pub fn evaluate_absolute_for(board: &Board, perspective: Color) -> i32 {
+        let score = Self::evaluate_absolute(board);
+        match perspective {
+            Color::White => score,
+            Color::Black => -score,
+        }
+    }
+
     /// Evaluate the board position (positive = good for white)
     pub fn evaluate_absolute(board: &Board) -> i32 {
         let mut score = 0;
